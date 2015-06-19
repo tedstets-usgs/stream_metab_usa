@@ -1,67 +1,45 @@
-# Parse command-line arguments
+source("p1_import/code/process_make_args.R")
+args <- process_make_args(c("sb_user", "sb_password", "outfile", "update_sitelist","on_exists", "delete_all", "verbose"))
 
-args <- commandArgs(TRUE)
-for (i in 1:length(args)){
-  eval(parse(text=args[i])) # expecting args sb_user, sb_password, and outfile
-}
-cat(paste0("Setting up site data as ", sb_user, "\n"))
+init_sites <- function(update_sitelist=TRUE, on_exists='clear', delete_all=FALSE, verbose=TRUE) {
+  # determine the baseline
+  sites_sb <- get_sites()
 
-
-# Load libraries
-
-library(dataRetrieval)
-library(mda.streams)
-library(sbtools)
-
-
-# Log in
-if(!missing(sb_password)) 
-  session = authenticate_sb(sb_user, sb_password) 
-else 
-  session = authenticate_sb(sb_user)
-
-
-#' Identify list of sites to import.
-#' 
-#' For a site to qualify, it must be in ANY of the passed-in stateCd values and
-#' have data for ALL of the passed-in p_codes values
-identify_nwis_sites <- function(p_codes=c('00010', '00060', '00095', '00300'), stateCd="all") {
-  pcodes <- dataRetrieval::readNWISpCode(p_codes)
-  cat("Requiring all of the following parameter codes:\n")
-  print(pcodes)
-  gsub("nwis-", "nwis_", mda.streams::init_nwis_sites(p_codes, stateCd))
-}
-site_ids <- identify_nwis_sites(p_codes=c('00010', '00060', '00095', '00300'), stateCd=c("wi"))
-
-#' Create site items on SB
-#' 
-#' Much of the functionality here, which I largely copied from the demo file in
-#' mda.streams, is actually in newer functions now. So this function is
-#' partially obsolete.
-create_SB_sites <- function(site_ids, parent_sb_item='5487139fe4b02acb4f0c8110', session) {
-
-  # Add any items that don't already exist
-  for(i in 1:length(site_ids)){
-    
-    # If the item already exists, skip it
-    tmp = sbtools::query_item_identifier('mda_streams','site_root', site_ids[i], session)
-    exists <- item_exists("mda_streams", "site_root", site_ids[1], session)
-    if(nrow(tmp) > 0) {
-      warning('skipping site ', site_ids[i], ', already exists. SBid:', tmp[1,]$id)
-      next
-    }
-    
-    # Otherwise, create the item as a child of parent_sb_item
-    id = item_create(parent_id = parent_sb_item, title = site_ids[i], session = session)
-    item_update_identifier(id, 'mda_streams', 'site_root', site_ids[i], session)
+  # delete everything before starting (optional)
+  if(delete_all) {
+    if(verbose) message("deleting all sites on ScienceBase")
+    mda.streams:::delete_site(sites_sb, verbose=verbose) 
   }
   
-  # Check for any items under this parent that aren't in site_ids
-  all_items <- item_list_children(parent_sb_item, session=session, limit=10000)
-  item_get(id=all_items$id[1])
+  # get sitelist from NWIS (optional)
+  if(update_sitelist) {
+    if(verbose) message("acquiring site list from NWIS server")
+    sites_file <- stage_nwis_sitelist(vars="doobs", state_codes=c("all"), folder="p1_import/doc", verbose=verbose)
+  } else {
+    sites_file <- "p1_import/doc/nwis_sitelist.txt"
+  }
+  
+  # post/repost sites to SB
+  sites_nwis <- readLines(sites_file)
+  if(verbose) message("posting sites with on_exists==",on_exists)
+  posted_sites <- post_site(sites_nwis, on_exists=on_exists, verbose=verbose)
+  
+  # print results
+  if(verbose) {
+    message("posted sites:")
+    sites_display <- 
+      data.frame(site=names(posted_sites), posted_id=posted_sites, stringsAsFactors=FALSE) %>%
+      transmute(site, existing_id=ifelse(names(posted_sites) %in% sites_sb, locate_site(site), NA), posted_id)
+    print(sites_display)
+  }
+  
+  # check for sites that aren't in the new sitelist (but just print, don't delete)
+  sites_sb <- get_sites()
+  if(verbose) {
+    message("sites that are on SB but not in the nwis sitelist:")
+    cat(paste0(setdiff(sites_sb, sites_nwis), collapse="\n"))
+  }
+  
+  return()
 }
-create_SB_sites(site_ids=site_ids, parent_sb_item='5487139fe4b02acb4f0c8110', session)
-
-#' Add time series data to SB
-
-#' Add watershed delineations to SB
+init_sites(update_sitelist=args$update_sitelist, on_exists=args$on_exists, delete_all=args$delete_all, verbose=args$verbose)
